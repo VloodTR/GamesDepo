@@ -1,0 +1,141 @@
+# VloodTR - GitHub Actions
+
+name: Generate Games JSON
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '*.pck'
+      - '.github/workflows/generate-games.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: generate-games-json
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    name: Generate Games Manifest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Find PCK Files
+        id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t PACKS < <(
+            find . -maxdepth 1 -type f -iname '*.pck' \
+              -printf '%f\n' | sort -f
+          )
+
+          echo "Found ${#PACKS[@]} game packages."
+
+          if [ "${#PACKS[@]}" -eq 0 ]; then
+            echo "::error::No PCK files found in repository root."
+            exit 1
+          fi
+
+      - name: Generate games.json
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .github/temp
+          rm -f .github/temp/*.json
+
+          for FILE in *.pck *.PCK; do
+            [ -f "$FILE" ] || continue
+
+            # Dosya adından oyun kimliği oluştur.
+            NAME="${FILE%.*}"
+
+            ID=$(echo "$NAME" \
+              | sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')
+
+            # PascalCase dosya adını okunabilir başlığa dönüştür.
+            TITLE=$(echo "$NAME" \
+              | sed -E 's/([a-z0-9])([A-Z])/\1 \2/g; s/([A-Z])([A-Z][a-z])/\1 \2/g')
+
+            SIZE=$(stat -c%s "$FILE")
+
+            DOWNLOAD="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/${FILE}"
+
+            echo "Generating: $FILE"
+
+            jq -n \
+              --arg id "$ID" \
+              --arg title "$TITLE" \
+              --arg file "$FILE" \
+              --arg download "$DOWNLOAD" \
+              --argjson size "$SIZE" \
+              '{
+                id: $id,
+                title: $title,
+                file: $file,
+                main_scene: "res://Main.tscn",
+                download_url: $download,
+                file_size_bytes: $size,
+                format: "godot_pck",
+                engine: "Godot",
+                platform: "android",
+                enabled: true
+              }' > ".github/temp/${ID}.json"
+
+          done
+
+          # Bütün oyun kayıtlarını tek JSON içerisinde birleştir.
+          jq -s \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg branch "main" \
+            --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              branch: $branch,
+              generated_at: $generated,
+              total_games: length,
+              games: sort_by(.id)
+            }' .github/temp/*.json > games.json
+
+          # JSON doğrulaması.
+          jq empty games.json
+
+          echo "games.json successfully generated!"
+
+          cat games.json
+
+          rm -rf .github/temp
+
+      - name: Commit and Push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add games.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: automatically generate games.json"
+
+          git push origin main
