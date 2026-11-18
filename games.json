@@ -1,1 +1,8 @@
-{"games":[]}
+{
+  "games": [
+    {
+      "Name": "VloodTenis",
+      "PCK": "VloodTenis.pck"
+    }
+  ]
+}
