@@ -1,5 +1,6 @@
 # VloodTR - GitHub Actions
 
+
 name: Generate Games JSON
 
 on:
@@ -8,6 +9,7 @@ on:
       - main
     paths:
       - '*.pck'
+      - '*.PCK'
       - '.github/workflows/generate-games.yml'
 
   workflow_dispatch:
@@ -15,127 +17,58 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: generate-games-json
-  cancel-in-progress: true
-
 jobs:
   generate:
     name: Generate Games Manifest
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: main
 
-      - name: Find PCK Files
-        id: find
+      - name: Generate Games JSON
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          mapfile -t PACKS < <(
-            find . -maxdepth 1 -type f -iname '*.pck' \
-              -printf '%f\n' | sort -f
-          )
+          TEMP=$(mktemp -d)
+          INDEX=0
 
-          echo "Found ${#PACKS[@]} game packages."
-
-          if [ "${#PACKS[@]}" -eq 0 ]; then
-            echo "::error::No PCK files found in repository root."
-            exit 1
-          fi
-
-      - name: Generate games.json
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p .github/temp
-          rm -f .github/temp/*.json
-
-          for FILE in *.pck *.PCK; do
-            [ -f "$FILE" ] || continue
-
-            # Dosya adından oyun kimliği oluştur.
-            NAME="${FILE%.*}"
-
-            ID=$(echo "$NAME" \
-              | sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' \
-              | tr '[:upper:]' '[:lower:]' \
-              | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')
-
-            # PascalCase dosya adını okunabilir başlığa dönüştür.
-            TITLE=$(echo "$NAME" \
-              | sed -E 's/([a-z0-9])([A-Z])/\1 \2/g; s/([A-Z])([A-Z][a-z])/\1 \2/g')
-
-            SIZE=$(stat -c%s "$FILE")
-
-            DOWNLOAD="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/${FILE}"
-
-            echo "Generating: $FILE"
+          while IFS= read -r -d '' FILE; do
+            FILENAME=$(basename "$FILE")
+            NAME="${FILENAME%.*}"
+            NAME="${NAME^}"
 
             jq -n \
-              --arg id "$ID" \
-              --arg title "$TITLE" \
-              --arg file "$FILE" \
-              --arg download "$DOWNLOAD" \
-              --argjson size "$SIZE" \
-              '{
-                id: $id,
-                title: $title,
-                file: $file,
-                main_scene: "res://Main.tscn",
-                download_url: $download,
-                file_size_bytes: $size,
-                format: "godot_pck",
-                engine: "Godot",
-                platform: "android",
-                enabled: true
-              }' > ".github/temp/${ID}.json"
+              --arg name "$NAME" \
+              --arg pck "$FILENAME" \
+              '{Name: $name, PCK: $pck}' \
+              > "$TEMP/$INDEX.json"
 
-          done
+            INDEX=$((INDEX + 1))
+          done < <(
+            find . -maxdepth 1 -type f -iname '*.pck' -print0 | sort -z
+          )
 
-          # Bütün oyun kayıtlarını tek JSON içerisinde birleştir.
-          jq -s \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --arg branch "main" \
-            --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{
-              schema_version: 1,
-              repository: $repository,
-              branch: $branch,
-              generated_at: $generated,
-              total_games: length,
-              games: sort_by(.id)
-            }' .github/temp/*.json > games.json
+          jq -s '{games: .}' "$TEMP"/*.json > games.json 2>/dev/null || echo '{"games":[]}' > games.json
 
-          # JSON doğrulaması.
           jq empty games.json
 
-          echo "games.json successfully generated!"
+          rm -rf "$TEMP"
 
-          cat games.json
+          echo "Games JSON generated successfully!"
 
-          rm -rf .github/temp
-
-      - name: Commit and Push
-        shell: bash
+      - name: Push Changes
         run: |
-          set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add games.json
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No changes."
             exit 0
           fi
 
-          git commit -m "chore: automatically generate games.json"
-
+          git commit -m "Update games.json"
           git push origin main
